@@ -1,0 +1,21 @@
+services:
+  api:
+    build: .
+    image: fish-population-api:latest
+    container_name: fish-population-api
+    ports:
+      - "8000:8000"
+    volumes:
+      - survey-data:/data
+    environment:
+      SURVEY_DB_PATH: /data/surveys.db
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/health')"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+      start_period: 5s
+    restart: unless-stopped
+
+volumes:
+  survey-data:
