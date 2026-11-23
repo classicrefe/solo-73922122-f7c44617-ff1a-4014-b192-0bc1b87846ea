@@ -68,7 +68,7 @@ class Estimate:
 # --------------------------------------------------------------------------- #
 
 
-def _maximum_matching(
+def maximum_matching(
     adjacency: list[list[int]], n_left: int, n_right: int, left_subset: list[int] | None = None
 ) -> int:
     """计算二分图最大匹配，返回匹配边数。
@@ -267,7 +267,7 @@ def estimate_population(
             required_left.append(left)
 
     # r_min：所有「不可能是新个体」的记录必须配上标牌
-    required_matched = _maximum_matching(adjacency, C, M, required_left)
+    required_matched = maximum_matching(adjacency, C, M, required_left)
     if required_matched != len(required_left):
         raise EstimationError(
             "无可行配对：存在必须重捕的记录，但受一牌一记录约束无法全部配上标牌"
@@ -275,7 +275,7 @@ def estimate_population(
     r_min = len(required_left)
 
     # r_max：整图最大匹配
-    r_max = _maximum_matching(adjacency, C, M)
+    r_max = maximum_matching(adjacency, C, M)
 
     # 总体上限约束：M + C - r <= cap  <=>  r >= M + C - cap
     cap_floor = M + C - cap

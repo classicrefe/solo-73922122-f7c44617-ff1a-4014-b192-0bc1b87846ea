@@ -41,6 +41,25 @@ def _now() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="seconds")
 
 
+class CurrentVersionMismatch(Exception):
+    """发布时现行版号与请求期望不一致（乐观并发冲突），本次不留新版本。"""
+
+    def __init__(self, expected: int | None, actual: int | None):
+        self.expected = expected
+        self.actual = actual
+        if actual is None:
+            hint = "该调查单尚无现行版本，expected_current_version 应填 null"
+        elif expected is None:
+            hint = f"该调查单现行版本已是 v{actual}，expected_current_version 不能填 null"
+        else:
+            hint = f"现行版本已变为 v{actual}，与请求期望的 v{expected} 不一致"
+        super().__init__(f"现行版号冲突：{hint}；本次未写入新版本")
+
+
+class SaveConflictError(Exception):
+    """并发写入导致保存失败（如版本号唯一约束）；本次不留新版本。"""
+
+
 class SurveyStore:
     def __init__(self, db_path: str | os.PathLike[str]):
         self.db_path = str(db_path)
@@ -101,6 +120,76 @@ class SurveyStore:
                     "WHERE survey_id=? AND version=?",
                     (survey_id, next_version),
                 )
+        return self.get_version(survey_id, next_version)  # type: ignore[return-value]
+
+    def save_version_if_current(
+        self,
+        survey_id: str,
+        expected_current_version: int | None,
+        payload: dict,
+        result: dict,
+    ) -> dict:
+        """仅当现行版号与期望一致时，追加 ok 版本并切换现行指针（单事务）。
+
+        补录复核的发布路径：计算期间同单可继续更正，本方法在提交前用
+        BEGIN IMMEDIATE 取写锁并核对现行版号；版号冲突或保存失败时整体
+        回滚，本次不留新版本。
+        """
+        created_at = _now()
+        conn = self._connect()
+        conn.isolation_level = None  # 手动管理事务
+        next_version = -1
+        try:
+            conn.execute("BEGIN IMMEDIATE")
+            row = conn.execute(
+                "SELECT version FROM survey_versions WHERE survey_id=? AND is_current=1",
+                (survey_id,),
+            ).fetchone()
+            actual = row["version"] if row is not None else None
+            if actual != expected_current_version:
+                raise CurrentVersionMismatch(expected_current_version, actual)
+            conn.execute(
+                "INSERT OR IGNORE INTO surveys(survey_id, created_at) VALUES (?, ?)",
+                (survey_id, created_at),
+            )
+            next_version = conn.execute(
+                "SELECT COALESCE(MAX(version), 0) + 1 AS v FROM survey_versions WHERE survey_id=?",
+                (survey_id,),
+            ).fetchone()["v"]
+            conn.execute(
+                "INSERT INTO survey_versions"
+                "(survey_id, version, status, created_at, payload, result, error, is_current) "
+                "VALUES (?, ?, 'ok', ?, ?, ?, NULL, 0)",
+                (
+                    survey_id,
+                    next_version,
+                    created_at,
+                    json.dumps(payload, ensure_ascii=False),
+                    json.dumps(result, ensure_ascii=False),
+                ),
+            )
+            conn.execute(
+                "UPDATE survey_versions SET is_current=0 WHERE survey_id=?", (survey_id,)
+            )
+            conn.execute(
+                "UPDATE survey_versions SET is_current=1 WHERE survey_id=? AND version=?",
+                (survey_id, next_version),
+            )
+            conn.execute("COMMIT")
+        except CurrentVersionMismatch:
+            conn.execute("ROLLBACK")
+            raise
+        except sqlite3.IntegrityError as exc:
+            conn.execute("ROLLBACK")
+            raise SaveConflictError(f"保存失败（并发写入冲突）：{exc}；本次未写入新版本") from exc
+        except Exception:
+            try:
+                conn.execute("ROLLBACK")
+            except sqlite3.Error:
+                pass
+            raise
+        finally:
+            conn.close()
         return self.get_version(survey_id, next_version)  # type: ignore[return-value]
 
     @staticmethod
